@@ -2,8 +2,8 @@
 CRYPTLIB_DIR=../cryptlib-3.4.1
 CRYPTLIB_LIB=libcl.a
 
-CFLAGS += -Wall -O0 -g
-#CFLAGS += -Wall -O2
+CFLAGS += -Wall -O0 -g -Werror
+#CFLAGS += -Wall -O2 -Werror
 
 LIBS=$(CRYPTLIB_DIR)/$(CRYPTLIB_LIB) -lpthread
 
@@ -12,4 +12,11 @@ chunker: chunker.c $(CRYPTLIB_DIR)/$(CRYPTLIB_LIB)
 	$(CC) -o chunker chunker.o $(LIBS)
 
 run: chunker
-	./chunker 
+	./chunker tests/testinput_1.bin testinput_1.bin.
+
+# Run unit-tests
+check: chunker
+	./chunker
+
+valgrind: chunker
+	valgrind --leak-check=full ./chunker
