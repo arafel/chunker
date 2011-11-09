@@ -323,13 +323,15 @@ static int write_context_hash(const char *basename, const char *extension, CRYPT
                 return rc;
         }
 
-        buflen = strlen(basename) + strlen(extension) + 1;
+        buflen = strlen(basename) + strlen(extension) + 2;
         name = malloc(buflen);
         if (NULL == name)
         {
                 printf("Couldn't allocate %i byte name buffer.\n", buflen);
                 return -1;
         }
+
+        snprintf(name, buflen, "%s.%s", basename, extension);
 
         fd = open(name, O_WRONLY | O_CREAT | O_TRUNC, 0622);
         if (fd < 0)
@@ -464,6 +466,8 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 {
                         printf("Finished chunk %i.\n", chunkcount);
                         close_file(&outfile);
+                        cryptEncrypt(*md5, buf, 0);
+                        cryptEncrypt(*sha1, buf, 0);
                         write_context_hash(outfilename, "md5", md5);
                         write_context_hash(outfilename, "sha1", sha1);
 
