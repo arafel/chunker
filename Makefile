@@ -19,4 +19,4 @@ check: chunker
 	./chunker
 
 valgrind: chunker
-	valgrind --leak-check=full ./chunker tests/testinput_1.bin testinput_1.bin.
+	valgrind --suppressions=valgrind.supp --leak-check=full ./chunker tests/testinput_1.bin testinput_1.bin.

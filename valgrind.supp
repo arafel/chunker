@@ -1,0 +1,21 @@
+{
+   nss_database_lookup
+   Memcheck:Leak
+   fun:malloc
+   fun:nss_parse_service_list
+   fun:__nss_database_lookup
+   obj:*
+   obj:*
+   fun:getpwuid_r@@GLIBC_2.1.2
+   fun:getpwuid
+   fun:fileBuildCryptlibPath
+}
+{
+   pthread_create
+   Memcheck:Leak
+   fun:calloc
+   fun:_dl_allocate_tls
+   fun:pthread_create@@GLIBC_2.1
+   fun:krnlDispatchThread
+   fun:(below main)
+}
