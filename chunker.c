@@ -235,16 +235,15 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
         else
                 bytestoread = (ssize_t)toread;
 
-        /* TODO implement common offset/size checking to ensure getting next buffer makes sense */
+        if ((file->size - file->offset) > bytestoread)
+                bytesread = bytestoread;
+        else
+                bytesread = (file->size - file->offset);
 
         /* See if we can do it the easy way */
         if (file->start_buf)
         {
                 *buf = file->start_buf + file->offset;
-                if ((file->size - file->offset) > bytestoread)
-                        bytesread = bytestoread;
-                else
-                        bytesread = (file->size - file->offset);
         }
         else
         {
@@ -321,6 +320,8 @@ static int write_context_hash(const char *basename, const char *extension, CRYPT
                 printf("Couldn't get hash from context - rc %i\n", rc);
                 return rc;
         }
+
+        assert(strlen(basename) > 0);
 
         buflen = strlen(basename) + strlen(extension) + 2;
         name = malloc(buflen);
@@ -525,13 +526,13 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 file_read_next_buffer(&infile, &buf, to_read, &bytecount);
         } while ((bytecount > 0) && (rc == 0));
 
-        free(outfilename);
         close_file(&infile);
         if (end_chunk(&outfile, outfilename, md5, sha1))
         {
                 printf("Error ending chunk\n");
                 retval = -1;
         }
+        free(outfilename);
 
         return retval;
 }
