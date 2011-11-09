@@ -108,7 +108,14 @@ static int reset_context(CRYPT_CONTEXT *context)
 {
         int rc = 0;
 
-        printf("%s - write me.\n", __func__);
+        assert(context);
+
+        rc = cryptDeleteAttribute(*context, CRYPT_CTXINFO_HASHVALUE);
+        if (cryptStatusError(rc))
+        {
+                printf("Couldn't reset context - rc %i\n", rc);
+        }
+
         return rc;
 }
 
@@ -172,7 +179,6 @@ static int open_file(const char *filename, file_info *file, bool reading, bool c
                 }
                 else
                 {
-                        printf("Successfully mmapped input to %p\n", file->start_buf);
                         file->temp_buf = NULL;
                 }
         }
@@ -195,7 +201,6 @@ static int close_file(file_info *file)
 
         if (MAP_FAILED != file->start_buf)
         {
-                printf("Unmapping %lld bytes (buffer %p)\n", file->size, file->start_buf);
                 munmap(file->start_buf, file->size);
         }
 
@@ -218,8 +223,6 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
         assert(file->fd >= 0);
         assert(buf);
 
-        printf("%s asked for next buffer on file %p\n", __func__, file);
-
         if (file->offset == file->size)
         {
                 *buf = NULL;
@@ -232,17 +235,12 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
         else
                 bytestoread = (ssize_t)toread;
 
-        printf("Reading %i bytes.\n", bytestoread);
-
         /* TODO implement common offset/size checking to ensure getting next buffer makes sense */
 
         /* See if we can do it the easy way */
         if (file->start_buf)
         {
-                printf("File is mapped, easy.\n");
-                printf("start_buf %p bufsize %i\n", file->start_buf, bytestoread);
                 *buf = file->start_buf + file->offset;
-                printf("Returning %p\n", *buf);
                 if ((file->size - file->offset) > bytestoread)
                         bytesread = bytestoread;
                 else
@@ -251,6 +249,7 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
         else
         {
                 printf("File isn't mapped, less easy.\n");
+                printf("Reading %i bytes.\n", bytestoread);
 
                 /* For speed, assume we're the only ones using this file pointer. */
                 bytesread = read(file->fd, file->temp_buf, bytestoread);
@@ -346,15 +345,47 @@ static int write_context_hash(const char *basename, const char *extension, CRYPT
                         printf("Expected to write %d bytes, only wrote %d.\n", hash_length, rc);
                         perror("Why");
                 }
-                else
-                {
-                        printf("Hash written okay.\n");
-                }
 
                 close(fd);
         }
 
         free(name);
+        return 0;
+}
+
+static int end_chunk(file_info *file, const char *outfilename, CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1)
+{                        
+        int rc;
+        char buf[1];
+
+        close_file(file);
+
+        rc = cryptEncrypt(*md5, buf, 0);
+        if (cryptStatusError(rc))
+        {
+                printf("Error finalising MD5 - rc %i\n", rc);
+                return rc;
+        }
+        rc = cryptEncrypt(*sha1, buf, 0);
+        if (cryptStatusError(rc))
+        {
+                printf("Error finalising SHA1 - rc %i\n", rc);
+                return rc;
+        }
+
+        rc = write_context_hash(outfilename, "md5", md5);
+        if (rc)
+                return rc;
+        rc = write_context_hash(outfilename, "sha1", sha1);
+        if (rc)
+                return rc;
+        rc = reset_context(md5);
+        if (rc)
+                return rc;
+        rc = reset_context(sha1);
+        if (rc)
+                return rc;
+
         return 0;
 }
 
@@ -364,7 +395,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         char *outfilename;
         file_info infile;
         file_info outfile;
-        int rc, outfilenamelen;
+        int rc, outfilenamelen, retval = 0;
         signed int to_read;
         unsigned int bytecount;
         unsigned long long int bytesleftinchunk;
@@ -386,13 +417,14 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         reset_context(sha1);
 
         printf("Splitting '%s' into chunks with basename '%s'\n", infilename, outfilenamebase);
-        printf("'%s' is %llu bytes in length; chunk length is %lld.\n", infilename, infile.size, chunksize);
 
         if (open_file(infilename, &infile, true, false, 5000))
         {
                 printf("Couldn't open input file for reading\n");
                 return -1;
         }
+        
+        printf("'%s' is %llu bytes in length; chunk length is %lld.\n", infilename, infile.size, chunksize);
 
         /* Filename, ., make wild assumption of no more than 100000 chunks. */
         outfilenamelen = strlen(infilename) + 1 + 6 + 1;
@@ -423,20 +455,18 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
 
         rc = 0;
         bytesleftinchunk = chunksize;
-        printf("Comparing %i to %lld\n", infile.bufsize, bytesleftinchunk);
         if (infile.bufsize > bytesleftinchunk)
                 to_read = bytesleftinchunk;
         else
                 to_read = -1;
-        printf("Reading %i bytes.\n", to_read);
         
         file_read_next_buffer(&infile, &buf, to_read, &bytecount);
         while ((bytecount > 0) && (rc == 0))
         {
-                printf("Got buffer %p, bytecount %i\n", buf, bytecount);
                 rc = file_write_next_buffer(&outfile, buf, bytecount);
                 if (rc != 0)
                 {
+                        printf("Got buffer %p, bytecount %i\n", buf, bytecount);
                         printf("Problem writing: ");
                         switch (rc)
                         {
@@ -465,11 +495,11 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 if (0 == bytesleftinchunk)
                 {
                         printf("Finished chunk %i.\n", chunkcount);
-                        close_file(&outfile);
-                        cryptEncrypt(*md5, buf, 0);
-                        cryptEncrypt(*sha1, buf, 0);
-                        write_context_hash(outfilename, "md5", md5);
-                        write_context_hash(outfilename, "sha1", sha1);
+                        if (end_chunk(&outfile, outfilename, md5, sha1))
+                        {
+                                printf("Error ending chunk\n");
+                                break;
+                        }
 
                         bytesleftinchunk = chunksize;
                         chunkcount++;
@@ -487,23 +517,23 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                                 break;
                         }
                 }
-                printf("Comparing %i to %lld\n", infile.bufsize, bytesleftinchunk);
                 if (infile.bufsize > bytesleftinchunk)
                         to_read = bytesleftinchunk;
                 else
                         to_read = -1;
-                printf("Reading %i bytes.\n", to_read);
 
                 file_read_next_buffer(&infile, &buf, to_read, &bytecount);
         } while ((bytecount > 0) && (rc == 0));
 
         free(outfilename);
         close_file(&infile);
-        close_file(&outfile);
-        write_context_hash(outfilename, "md5", md5);
-        write_context_hash(outfilename, "sha1", sha1);
+        if (end_chunk(&outfile, outfilename, md5, sha1))
+        {
+                printf("Error ending chunk\n");
+                retval = -1;
+        }
 
-        return 0;
+        return retval;
 }
  
 int main(int argc, char *argv[])
@@ -528,13 +558,9 @@ int main(int argc, char *argv[])
         md5 = init_context(CRYPT_ALGO_MD5);
         if (!md5)
                 printf("Couldn't create MD5 context\n");
-        else
-                printf("Got MD5 context %p\n", md5);
         sha1 = init_context(CRYPT_ALGO_SHA1);
         if (!sha1)
                 printf("Couldn't create SHA1 context\n");
-        else
-                printf("Got SHA1 context %p\n", sha1);
 
         split_file(md5, sha1, argv[1], argv[2], chunksize);
 
