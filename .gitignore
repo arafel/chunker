@@ -2,3 +2,5 @@
 *.o
 chunker
 Session.vim
+hexdump
+testinput_1.bin.*
