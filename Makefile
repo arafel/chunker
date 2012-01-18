@@ -9,14 +9,17 @@ LIBS=$(CRYPTLIB_DIR)/$(CRYPTLIB_LIB) -lpthread
 
 chunker: chunker.c $(CRYPTLIB_DIR)/$(CRYPTLIB_LIB)
 	$(CC) $(CFLAGS) -c chunker.c -I$(CRYPTLIB_DIR)
-	$(CC) -o chunker chunker.o $(LIBS)
+	$(CC) -o $@ chunker.o $(LIBS)
+
+hexdump: hexdump.c
+	$(CC) $(CFLAGS) -o $@ $<
 
 run: chunker
 	./chunker tests/testinput_1.bin testinput_1.bin.
 
 # Run unit-tests
-check: chunker
-	./chunker
+check: run hexdump
+	./check.sh testinput_1.bin.
 
 valgrind: chunker
 	valgrind --suppressions=valgrind.supp --leak-check=full ./chunker tests/testinput_1.bin testinput_1.bin.
