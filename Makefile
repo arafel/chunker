@@ -16,6 +16,9 @@ hexdump: hexdump.c
 
 run: chunker
 	./chunker tests/testinput_1.bin testinput_1.bin.
+	
+clean:
+	$(RM) testinput_1.bin.* hexdump chunker *.o
 
 # Run unit-tests
 check: run hexdump
