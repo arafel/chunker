@@ -210,6 +210,7 @@ static int close_file(file_info *file)
                 free(file->temp_buf);
         }
 
+        fsync(file->fd);
         close(file->fd);
 
         return 0;
@@ -304,6 +305,86 @@ static int file_write_next_buffer(file_info *file, const char *buf, unsigned int
 
 /**** Main functions */
 
+static int read_checkpoint(const char *filename, bool *checkpoint_found, unsigned int *chunk)
+{
+        int fd, ret = 0;
+
+        *checkpoint_found = false;
+        *chunk = 0;
+
+        fd = open(filename, O_RDONLY, 0666);
+        if (fd < 0)
+        {
+                /* Valid condition, don't error */
+                printf("Opening '%s' for reading\n", filename);
+                perror("Couldn't open");
+        }
+        else 
+        {
+                if (read(fd, chunk, sizeof(unsigned int)) != sizeof(unsigned int))
+                {
+                        perror("Couldn't read complete chunk ID\n");
+                        ret = -1;
+                }
+                else
+                {
+                        *checkpoint_found = true;
+                        printf("Found apparently valid checkpoint with chunk %i\n", *chunk);
+                }
+
+                close(fd);
+        }
+
+        return ret;
+}
+
+static int delete_checkpoint(const char *filename)
+{
+        int ret;
+
+        assert(filename);
+        
+        /* ret = unlink(filename); */
+        ret = 0;
+        if (ret != 0)
+        {
+                printf("Deleting '%s'\n", filename);
+                perror("Couldn't delete");
+        }
+
+        return ret;
+}
+
+static int update_checkpoint(const char *filename, unsigned int chunk)
+{
+        int fd, ret = 0;
+
+        fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd < 0)
+        {
+                printf("Opening '%s' for writing\n", filename);
+                perror("Couldn't open");
+                ret = -1;
+        }
+        else 
+        {
+                if (write(fd, &chunk, sizeof(unsigned int)) != sizeof(unsigned int))
+                {
+                        perror("Couldn't write complete chunk ID\n");
+                        ret = -1;
+                }
+                else
+                {
+                        printf("Updated checkpoint with chunk %i\n", chunk);
+                }
+
+                fsync(fd);
+                close(fd);
+        }
+
+        return ret;
+}
+
 static int write_context_hash(const char *basename, const char *extension, CRYPT_CONTEXT *context)
 {
         int buflen, fd, hash_length, rc;
@@ -354,12 +435,10 @@ static int write_context_hash(const char *basename, const char *extension, CRYPT
         return 0;
 }
 
-static int end_chunk(file_info *file, const char *outfilename, CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1)
+static int end_chunk(const char *outfilename, CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1)
 {                        
         int rc;
         char buf[1];
-
-        close_file(file);
 
         rc = cryptEncrypt(*md5, buf, 0);
         if (cryptStatusError(rc))
@@ -394,9 +473,12 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
 {
         char *buf;
         char *outfilename;
+        char *checkpointname;
         file_info infile;
         file_info outfile;
-        int rc, outfilenamelen, retval = 0;
+        int rc, retval = 0;
+        int outfilenamelen, checkpointnamelen;
+        /* bool checkpoint_found; */
         signed int to_read;
         unsigned int bytecount;
         unsigned long long int bytesleftinchunk;
@@ -427,12 +509,39 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         
         printf("'%s' is %llu bytes in length; chunk length is %lld.\n", infilename, infile.size, chunksize);
 
+        checkpointnamelen = strlen(outfilenamebase) + strlen("checkpoint") + 1;
+        checkpointname = (char *)malloc(checkpointnamelen);
+        if (NULL == checkpointname)
+        {
+                printf("Couldn't allocate memory for checkpoint filename\n");
+                close_file(&infile);
+                return -1;
+        }
+        snprintf(checkpointname, checkpointnamelen, "%scheckpoint", outfilenamebase);
+        printf("Using checkpoint file %s\n", checkpointname);
+
+        {
+                bool found;
+                unsigned int tmpchunk;
+                if (read_checkpoint(checkpointname, &found, &tmpchunk))
+                {
+                        printf("Error reading checkpoint\n");
+                }
+                else
+                {
+                        printf("Checkpoint found: %s\n", found?"yes":"no");
+                        if (found)
+                                printf("\tRestarting at chunk %i\n", tmpchunk);
+                }
+        }
+
         /* Filename, ., make wild assumption of no more than 100000 chunks. */
         outfilenamelen = strlen(infilename) + 1 + 6 + 1;
         outfilename = (char *)malloc(outfilenamelen);
         if (NULL == outfilename)
         {
                 printf("Couldn't allocate memory for output filenames\n");
+                free(checkpointname);
                 close_file(&infile);
                 return -1;
         }
@@ -441,6 +550,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         {
                 printf("Output filename too long (hit buffer size of %i bytes\n", outfilenamelen);
                 printf("Stopping now to avoid data issues.\n");
+                free(checkpointname);
                 close_file(&infile);
                 free(outfilename);
                 return -1;
@@ -450,6 +560,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         if (open_file(outfilename, &outfile, false, true, 7500))
         {
                 printf("Couldn't open output file for writing\n");
+                free(checkpointname);
                 close_file(&infile);
                 return -1;
         }
@@ -496,18 +607,22 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 if (0 == bytesleftinchunk)
                 {
                         printf("Finished chunk %i.\n", chunkcount);
-                        if (end_chunk(&outfile, outfilename, md5, sha1))
+                        close_file(&outfile);
+
+                        if (end_chunk(outfilename, md5, sha1))
                         {
                                 printf("Error ending chunk\n");
                                 break;
                         }
+
+                        update_checkpoint(checkpointname, chunkcount);
 
                         bytesleftinchunk = chunksize;
                         chunkcount++;
 
                         if (snprintf(outfilename, outfilenamelen, "%s%i", outfilenamebase, chunkcount) == outfilenamelen)
                         {
-                                printf("Output filename too long (hit buffer size of %i bytes\n", outfilenamelen);
+                                printf("Output filename too long (hit buffer size of %i bytes)\n", outfilenamelen);
                                 printf("Stopping now to avoid data issues.\n");
                                 break;
                         }
@@ -527,11 +642,15 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         } while ((bytecount > 0) && (rc == 0));
 
         close_file(&infile);
-        if (end_chunk(&outfile, outfilename, md5, sha1))
+        close_file(&outfile);
+        if (end_chunk(outfilename, md5, sha1))
         {
                 printf("Error ending chunk\n");
                 retval = -1;
         }
+
+        delete_checkpoint(checkpointname);
+        free(checkpointname);
         free(outfilename);
 
         return retval;
