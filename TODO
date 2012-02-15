@@ -1,0 +1,5 @@
+ * Update checkpoint during chunking (#2)
+ * Delete checkpoint after successful run (#3)
+ * Detect incomplete run (#4)
+ * Document cryptlib dependency - how to get it, etc
+ * Add licence (issue 5)

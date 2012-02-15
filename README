@@ -1,0 +1,3 @@
+This is a place holder. The project is intended to help splitting large files -
+each chunk is hashed to make sure it's okay, and there will be checkpoints so
+the split can be resumed.
