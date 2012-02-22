@@ -364,8 +364,7 @@ static int delete_checkpoint(const char *filename)
 
         assert(filename);
         
-        /* ret = unlink(filename); */
-        ret = 0;
+        ret = unlink(filename);
         if (ret != 0)
         {
                 printf("Deleting '%s'\n", filename);
@@ -379,6 +378,7 @@ static int update_checkpoint(const char *filename, unsigned int chunk)
 {
         int fd, ret = 0;
 
+        /* TODO probably better to do a rename instead, safer. */
         fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (fd < 0)
         {
