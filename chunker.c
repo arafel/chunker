@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -63,6 +64,8 @@ static bool g_hit_debug_max_chunk = false;
 
 static char g_tmpfile_template[300];
 static bool g_tmpfile_template_created = false;
+
+static bool g_verbose = false;
 
 /**** Prototypes */
 
@@ -467,7 +470,7 @@ static int update_checkpoint(checkpoint *cp, unsigned int chunk)
         {
                 char *tmpdir;
                 
-                printf("Setting up tmpfile template\n");
+                /* printf("Setting up tmpfile template\n"); */
                 memset(g_tmpfile_template, 0, sizeof(g_tmpfile_template));
 
                 tmpdir = getenv("TMPDIR");
@@ -518,7 +521,6 @@ static int update_checkpoint(checkpoint *cp, unsigned int chunk)
 
                 close(fd);
 
-                printf("Renaming temporary file '%s' to '%s'\n", local_template, cp->filename);
                 if (rename(local_template, cp->filename))
                 {
                         printf("Renaming temporary file '%s' to '%s'\n", local_template, cp->filename);
@@ -843,13 +845,60 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
 int main(int argc, char *argv[])
 {
         int rc = 0;
+        int index, c;
         CRYPT_CONTEXT *md5, *sha1;
         unsigned long int chunksize = (10 * 1024);
+        char *infile, *basename;
 
-        if (argc < 3)
+        while ((c = getopt(argc, argv, "s:v")) != -1)
         {
-                printf("Usage: %s <file> <output basename>\n", argv[0]);
-                return 1;
+                switch (c)
+                {
+                        case 's':
+                                g_debug_max_chunk = atoi(optarg);
+                                if ((0 == g_debug_max_chunk) && (!strcmp(optarg, "0")))
+                                        printf("Warning - '%s' doesn't seem to be a number.\n", optarg);
+                                else
+                                        printf("Debug mode - stopping after %i chunks.\n", g_debug_max_chunk);
+                                break;
+                        case 'v':
+                                g_verbose = true;
+                                printf("Setting verbose to true. (Actually has no effect right now.)\n");
+                                break;
+                        case '?':
+                                if (optopt == 's')
+                                        fprintf(stderr, "option -%c requires an argument.\n", optopt);
+                                else if (isprint(optopt))
+                                        fprintf(stderr, "Unknown option '-%c'\n", optopt);
+                                else
+                                        fprintf(stderr, "Unknown option character '\\x%x'.\n", optopt);
+                                return 1;
+                                break;
+                        default:
+                                fprintf(stderr, "Shouldn't ever reach this point.\n");
+                                abort();
+                }
+        }
+
+        infile = NULL;
+        basename = NULL;
+        for (index = optind; index < argc; index++)
+        {
+                if (NULL == infile)
+                        infile = argv[index];
+                else if (NULL == basename)
+                        basename = argv[index];
+                else
+                {
+                        fprintf(stderr, "Too many arguments! (%s)\n", argv[index]);
+                        break;
+                }
+        }
+
+        if ((NULL == infile) || (NULL == basename))
+        {
+                fprintf(stderr, "Not enough arguments - need to supply filename and basename for chunks.\n");
+                return -1;
         }
 
         rc = cryptInit();
@@ -866,7 +915,7 @@ int main(int argc, char *argv[])
         if (!sha1)
                 printf("Couldn't create SHA1 context\n");
 
-        split_file(md5, sha1, argv[1], argv[2], chunksize);
+        split_file(md5, sha1, infile, basename, chunksize);
 
         free_context(md5);
         free_context(sha1);

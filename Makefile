@@ -30,5 +30,9 @@ clean:
 check: run hexdump
 	./check.sh testinput_1.bin.
 
+# see Run target earlier
+stopcheck: chunker hexdump
+	./chunker -s 2 tests/testinput_1.bin testinput_1.bin.
+
 valgrind: chunker
 	valgrind --suppressions=valgrind.supp --leak-check=full ./chunker tests/testinput_1.bin testinput_1.bin.
