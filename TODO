@@ -3,3 +3,4 @@
  * Detect incomplete run (#4)
  * Document cryptlib dependency - how to get it, etc
  * Add licence (issue 5)
+ * Compare filename in checkpoint too (currently not saved)

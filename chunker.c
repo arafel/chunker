@@ -59,6 +59,7 @@ typedef struct checkpoint_s
 /**** Statics */
 
 static int g_debug_max_chunk = 0;
+static bool g_hit_debug_max_chunk = false;
 
 static char g_tmpfile_template[300];
 static bool g_tmpfile_template_created = false;
@@ -71,16 +72,19 @@ static int free_context(CRYPT_CONTEXT *context);
 static int reset_context(CRYPT_CONTEXT *context);
 
 static int create_checkpoint(checkpoint **cp, const char *filename, unsigned long long int chunksize);
-static int delete_checkpoint(const char *filename);
+static int delete_checkpoint(checkpoint *cp);
 static int destroy_checkpoint(checkpoint *cp);
-static int read_checkpoint(checkpoint *cp, bool *checkpoint_found, unsigned int *chunk, bool silent);
-static int update_checkpoint(const char *filename, unsigned int chunk);
+static int restore_checkpoint(checkpoint **cp, bool *checkpoint_found, const char *filename, unsigned int *chunk, unsigned long long int chunksize);
+static int update_checkpoint(checkpoint *cp, unsigned int chunk);
 
 /**** Worker functions */
 
 static int filesize(const char *filename, unsigned long long int *filesize)
 {
         struct stat st;
+
+        assert(filename);
+        assert(filesize);
 
         if (stat(filename, &st))
         {
@@ -120,11 +124,7 @@ static int free_context(CRYPT_CONTEXT *context)
 {
         int rc;
 
-        if (!context)
-        {
-                printf("Bad context %p given\n", context);
-                return -1;
-        }
+        assert(context);
 
         rc = cryptDestroyContext(*context);
         if (cryptStatusError(rc))
@@ -349,6 +349,9 @@ static int create_checkpoint(checkpoint **cp, const char *filename, unsigned lon
         tmp_cp = malloc(sizeof(checkpoint));
 
         tmp_cp->filename = strdup(filename);
+        tmp_cp->chunksize = chunksize;
+        tmp_cp->last_chunk = 0;
+        printf("Created checkpoint - filename %s, chunksize %lld\n", filename, chunksize);
 
         *cp = tmp_cp;
 
@@ -358,11 +361,10 @@ static int create_checkpoint(checkpoint **cp, const char *filename, unsigned lon
 static int destroy_checkpoint(checkpoint *cp)
 {
         assert(cp);
+        assert(cp->filename);
 
-        if (cp->filename)
-        {
-                free(cp->filename);
-        }
+        free(cp->filename);
+        cp->filename = NULL;
 
         free(cp);
         cp = NULL;
@@ -370,69 +372,96 @@ static int destroy_checkpoint(checkpoint *cp)
         return 0;
 }
 
-static int read_checkpoint(checkpoint *cp, bool *checkpoint_found, unsigned int *chunk, bool silent)
+static int restore_checkpoint(checkpoint **cp, bool *checkpoint_found, const char *filename, unsigned int *chunk, unsigned long long int chunksize)
 {
-        /* checkpoint tmp_cp; */
+        checkpoint tmp_cp;
+        checkpoint *new_cp;
         int fd, ret = 0;
 
         assert(cp);
-        assert(checkpoint_found);
         assert(chunk);
+        assert(checkpoint_found);
 
         *chunk = 0;
+        *cp = NULL;
         *checkpoint_found = false;
 
-        fd = open(cp->filename, O_RDONLY, 0666);
+        fd = open(filename, O_RDONLY, 0666);
         if (fd < 0)
         {
                 /* Valid condition, don't error */
-                if (!silent)
-                {
-                        printf("Opening '%s' for reading\n", cp->filename);
-                        perror("Couldn't open");
-                }
-                ret = -1;
+                ret = 0;
         }
         else 
         {
-                if (read(fd, chunk, sizeof(unsigned int)) != sizeof(unsigned int))
+                if (read(fd, &tmp_cp, sizeof(checkpoint)) != sizeof(checkpoint))
                 {
-                        perror("Couldn't read complete chunk ID - bad checkpoint, deleting\n");
-                        close(fd);
-                        delete_checkpoint(cp->filename);
-                        ret = -1;
+                        /* Couldn't read complete checkpoint, deleting */
+                        unlink(filename);
+                        ret = 0;
                 }
                 else
                 {
                         close(fd);
-                        *checkpoint_found = true;
-                        printf("Found apparently valid checkpoint with chunk %i\n", *chunk);
+                        /* TODO fix me */
+#if 0
+                        if (strcmp(tmp_cp.filename, filename) != 0)
+                        {
+                                printf("Filenames differ, invalid checkpoint\n");
+                                unlink(filename);
+                        }
+                        else 
+#endif
+                                if (tmp_cp.chunksize != chunksize)
+                        {
+                                printf("Chunksizes differ, invalid checkpoint\n");
+                                unlink(filename);
+                        }
+                        else
+                        {
+                                *checkpoint_found = true;
+
+                                new_cp = malloc(sizeof(checkpoint));
+                                new_cp->filename = strdup(filename);
+                                new_cp->chunksize = tmp_cp.chunksize;
+                                new_cp->last_chunk = tmp_cp.last_chunk;
+                                *chunk = new_cp->last_chunk;
+                                *cp = new_cp;
+                                printf("Found apparently-valid checkpoint, chunksize %lld, chunk %i\n", new_cp->chunksize, new_cp->last_chunk);
+                        }
+                }
+        }
+
+        return 0;
+}
+
+static int delete_checkpoint(checkpoint *cp)
+{
+        int ret;
+
+        assert(cp);
+        assert(cp->filename);
+        
+        if (!g_hit_debug_max_chunk)
+        {
+                ret = unlink(cp->filename);
+                ret = 0;
+                if (ret != 0)
+                {
+                        printf("Deleting '%s'\n", cp->filename);
+                        perror("Couldn't delete");
                 }
         }
 
         return ret;
 }
 
-static int delete_checkpoint(const char *filename)
-{
-        int ret;
-
-        assert(filename);
-        
-        ret = unlink(filename);
-        if (ret != 0)
-        {
-                printf("Deleting '%s'\n", filename);
-                perror("Couldn't delete");
-        }
-
-        return ret;
-}
-
-static int update_checkpoint(const char *filename, unsigned int chunk)
+static int update_checkpoint(checkpoint *cp, unsigned int chunk)
 {
         char *local_template;
         int fd, ret = 0;
+
+        assert(cp);
 
         if (false == g_tmpfile_template_created)
         {
@@ -469,9 +498,11 @@ static int update_checkpoint(const char *filename, unsigned int chunk)
         }
         else 
         {
-                if (write(fd, &chunk, sizeof(unsigned int)) != sizeof(unsigned int))
+                cp->last_chunk = chunk;
+
+                if (write(fd, cp, sizeof(checkpoint)) != sizeof(checkpoint))
                 {
-                        perror("Couldn't write complete chunk ID\n");
+                        perror("Couldn't write complete checkpoint\n");
                         ret = -1;
                 }
                 else
@@ -487,9 +518,10 @@ static int update_checkpoint(const char *filename, unsigned int chunk)
 
                 close(fd);
 
-                if (rename(local_template, filename))
+                printf("Renaming temporary file '%s' to '%s'\n", local_template, cp->filename);
+                if (rename(local_template, cp->filename))
                 {
-                        printf("Renaming temporary file '%s' to '%s'\n", local_template, filename);
+                        printf("Renaming temporary file '%s' to '%s'\n", local_template, cp->filename);
                         perror("Couldn't rename temporary file");
                         ret = -1;
                 }
@@ -593,11 +625,11 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         file_info outfile;
         int rc, retval = 0;
         int outfilenamelen, checkpointnamelen;
-        /* bool checkpoint_found; */
+        bool checkpoint_found;
         signed int to_read;
         unsigned int bytecount;
         unsigned long long int bytesleftinchunk;
-        unsigned int chunkcount = 0;
+        unsigned int chunkcount = 0, starting_chunk = 0;
         checkpoint *cp;
 
         rc = 0;
@@ -625,6 +657,12 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         
         printf("'%s' is %llu bytes in length; chunk length is %lld.\n", infilename, infile.size, chunksize);
 
+        bytesleftinchunk = chunksize;
+        if (infile.bufsize > bytesleftinchunk)
+                to_read = bytesleftinchunk;
+        else
+                to_read = -1;
+
         checkpointnamelen = strlen(outfilenamebase) + strlen("checkpoint") + 1;
         checkpointname = (char *)malloc(checkpointnamelen);
         if (NULL == checkpointname)
@@ -636,25 +674,44 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         snprintf(checkpointname, checkpointnamelen, "%scheckpoint", outfilenamebase);
         printf("Using checkpoint file %s\n", checkpointname);
 
-        if (create_checkpoint(&cp, checkpointname, chunksize))
+        if (restore_checkpoint(&cp, &checkpoint_found, checkpointname, &starting_chunk, chunksize))
         {
-                printf("Couldn't create checkpoint %s\n", checkpointname);
+                printf("Error trying to restore checkpoint\n");
                 close_file(&infile);
                 return -1;
         }
 
+        if (!checkpoint_found)
         {
-                bool found;
-                unsigned int tmpchunk;
-                if (read_checkpoint(cp, &found, &tmpchunk, true))
+                printf("No outstanding checkpoint, starting from scratch.\n");
+
+                if (create_checkpoint(&cp, checkpointname, chunksize))
                 {
-                        printf("No outstanding checkpoint, starting from scratch.\n");
+                        printf("Couldn't create checkpoint %s\n", checkpointname);
+                        close_file(&infile);
+                        return -1;
                 }
-                else
+        }
+        else
+        {
+                printf("Checkpoint found: %s\n", checkpoint_found?"yes":"no");
+                if (checkpoint_found)
                 {
-                        printf("Checkpoint found: %s\n", found?"yes":"no");
-                        if (found)
-                                printf("\tRestarting at chunk %i\n", tmpchunk);
+                        /* checkpoint records last successful chunk, so we start 
+                         * on the next one */
+                        starting_chunk++;
+                        chunkcount = starting_chunk;
+                        printf("\tRestarting at chunk %i\n", starting_chunk);
+                }
+
+                /* Temporary use of rc variable */
+                rc = 0;
+                while (starting_chunk > 0)
+                {
+                        printf("Skipping chunk %i\n", rc);
+                        file_read_next_buffer(&infile, &buf, to_read, &bytecount);
+                        rc++;
+                        starting_chunk--;
                 }
         }
 
@@ -688,14 +745,9 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 return -1;
         }
 
-        rc = 0;
-        bytesleftinchunk = chunksize;
-        if (infile.bufsize > bytesleftinchunk)
-                to_read = bytesleftinchunk;
-        else
-                to_read = -1;
-        
         file_read_next_buffer(&infile, &buf, to_read, &bytecount);
+
+        rc = 0;
         while ((bytecount > 0) && (rc == 0))
         {
                 rc = file_write_next_buffer(&outfile, buf, bytecount);
@@ -738,13 +790,15 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                                 break;
                         }
 
-                        update_checkpoint(checkpointname, chunkcount);
+                        update_checkpoint(cp, chunkcount);
 
                         bytesleftinchunk = chunksize;
                         chunkcount++;
                         if ((g_debug_max_chunk > 0) && (chunkcount >= g_debug_max_chunk))
                         {
                                 printf("Debug: stopping after chunk %i\n", chunkcount);
+                                rc = -1;
+                                g_hit_debug_max_chunk = true;
                                 break;
                         }
 
@@ -777,7 +831,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 retval = -1;
         }
 
-        delete_checkpoint(checkpointname);
+        delete_checkpoint(cp);
         destroy_checkpoint(cp);
 
         free(checkpointname);
