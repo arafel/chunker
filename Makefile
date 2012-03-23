@@ -16,7 +16,13 @@ hexdump: hexdump.c
 
 run: chunker
 	./chunker tests/testinput_1.bin testinput_1.bin.
-	
+
+gdb: chunker
+	gdb -x gdb.args
+
+strace: chunker
+	strace ./chunker tests/testinput_1.bin testinput_1.bin.
+
 clean:
 	$(RM) testinput_1.bin.* hexdump chunker *.o
 
