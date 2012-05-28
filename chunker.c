@@ -62,6 +62,9 @@ typedef struct checkpoint_s
 static int g_debug_max_chunk = 0;
 static bool g_hit_debug_max_chunk = false;
 
+static bool g_debug_file_ops = false;
+static bool g_debug_checkpoint = false;
+
 static char g_tmpfile_template[300];
 static bool g_tmpfile_template_created = false;
 
@@ -81,6 +84,36 @@ static int restore_checkpoint(checkpoint **cp, bool *checkpoint_found, const cha
 static int update_checkpoint(checkpoint *cp, unsigned int chunk);
 
 /**** Worker functions */
+
+#if 0
+static void dump_buf(const char *buf, unsigned int count)
+{
+        char s[8 + 2 + (16 * 3) + 1];
+        int i, space, index;
+
+        if (NULL == buf)
+                return;
+
+        s[0] = '\0';
+        for (i = 0; i < count; i++)
+        {
+                if ((i % 16) == 0)
+                {
+                        if (strlen(s) > 0)
+                                printf("%s\n", s);
+                        memset(s, 0, sizeof(s));
+                        snprintf(s, sizeof(s), "%08x  ", i);
+                        index = (8 + 2);
+                        space = sizeof(s) - index;
+                }
+                snprintf(&s[index], space, "%02x ", (unsigned char)buf[i]); 
+                space -= 3;
+                index += 3;
+        }
+        if (strlen(s) > 0)
+                printf("%s\n", s);
+}
+#endif
 
 static int filesize(const char *filename, unsigned long long int *filesize)
 {
@@ -189,7 +222,8 @@ static int open_file(const char *filename, file_info *file, bool reading, bool c
                         flags |= O_CREAT | O_TRUNC;
         }
 
-        printf("Opening %s for %s\n", filename, reading?"reading":"writing");
+        if (g_verbose)
+                printf("Opening %s for %s\n", filename, reading?"reading":"writing");
         file->fd = open(filename, flags, 0644);
         if (file->fd < 0)
         {
@@ -266,6 +300,8 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
 
         if (file->offset == file->size)
         {
+                if (g_debug_file_ops)
+                        printf("%s - file offset %llu matches file size %llu\n", __func__, file->offset, file->size);
                 *buf = NULL;
                 *count = 0;
                 return 0;
@@ -285,6 +321,11 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
         if (file->start_buf)
         {
                 *buf = file->start_buf + file->offset;
+                if (g_debug_file_ops)
+                {
+                        printf("\t%s - file %p - adjusted offset by %i bytes (start %p buf now %p)\n", __func__,
+                                        file, bytestoread, file->start_buf, *buf);
+                }
         }
         else
         {
@@ -305,10 +346,15 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
                 {
                         printf("Bytes read %i doesn't match bufsize %i\n", bytesread, bytestoread);
                 }
-
+                else if (g_debug_file_ops)
+                {
+                        printf("\t%s - file %p - read %i bytes (target %i)\n",  __func__, file, bytesread, bytestoread);
+                }
         }
 
         file->offset += bytesread;
+        if (g_debug_file_ops)
+                printf("\t%s - file->offset now %lld\n", __func__, file->offset);
         *count = bytesread;
 
         return 0;
@@ -326,6 +372,11 @@ static int file_write_next_buffer(file_info *file, const char *buf, unsigned int
         {
                 printf("Bad parameter, file not open\n");
                 return -1;
+        }
+
+        if (g_debug_file_ops)
+        {
+                printf("\t%s - file %p - writing %i bytes from %p\n", __func__, file, count, buf);
         }
 
         written = write(file->fd, buf, count);
@@ -354,7 +405,8 @@ static int create_checkpoint(checkpoint **cp, const char *filename, unsigned lon
         tmp_cp->filename = strdup(filename);
         tmp_cp->chunksize = chunksize;
         tmp_cp->last_chunk = 0;
-        printf("Created checkpoint - filename %s, chunksize %lld\n", filename, chunksize);
+        if (g_debug_checkpoint)
+                printf("Created checkpoint - filename %s, chunksize %lld\n", filename, chunksize);
 
         *cp = tmp_cp;
 
@@ -501,6 +553,9 @@ static int update_checkpoint(checkpoint *cp, unsigned int chunk)
         }
         else 
         {
+                if (g_debug_checkpoint)
+                        printf("Updating checkpoint, tempfile %s\n", local_template);
+
                 cp->last_chunk = chunk;
 
                 if (write(fd, cp, sizeof(checkpoint)) != sizeof(checkpoint))
@@ -508,7 +563,7 @@ static int update_checkpoint(checkpoint *cp, unsigned int chunk)
                         perror("Couldn't write complete checkpoint\n");
                         ret = -1;
                 }
-                else
+                else if (g_verbose || g_debug_checkpoint)
                 {
                         printf("Updated checkpoint with chunk %i\n", chunk);
                 }
@@ -526,6 +581,10 @@ static int update_checkpoint(checkpoint *cp, unsigned int chunk)
                         printf("Renaming temporary file '%s' to '%s'\n", local_template, cp->filename);
                         perror("Couldn't rename temporary file");
                         ret = -1;
+                }
+                else if (g_debug_checkpoint)
+                {
+                        printf("Renamed %s to %s okay\n", local_template, cp->filename);
                 }
         }
 
@@ -696,24 +755,31 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         }
         else
         {
+                unsigned long long int bytes_to_skip;
+
                 printf("Checkpoint found: %s\n", checkpoint_found?"yes":"no");
                 if (checkpoint_found)
                 {
-                        /* checkpoint records last successful chunk, so we start 
-                         * on the next one */
-                        starting_chunk++;
-                        chunkcount = starting_chunk;
-                        printf("\tRestarting at chunk %i\n", starting_chunk);
+                        /* checkpoint records the last successful chunk, so we
+                         * start on the next one */
+                        printf("Checkpoint says last successful chunk was %i\n", starting_chunk);
+                        chunkcount = starting_chunk + 1;
+                        printf("\tRestarting at chunk %i\n", chunkcount);
                 }
 
-                /* Temporary use of rc variable */
+                /* Use the +1 variable; the chunk count is zero-based */
+                bytes_to_skip = chunkcount * chunksize;
                 rc = 0;
-                while (starting_chunk > 0)
+                while (bytes_to_skip > 0)
                 {
-                        printf("Skipping chunk %i\n", rc);
+                        if (infile.bufsize > bytes_to_skip)
+                                to_read = bytes_to_skip;
+                        else
+                                to_read = infile.bufsize;
+
                         file_read_next_buffer(&infile, &buf, to_read, &bytecount);
                         rc++;
-                        starting_chunk--;
+                        bytes_to_skip -= bytecount;
                 }
         }
 
@@ -730,7 +796,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
 
         if (snprintf(outfilename, outfilenamelen, "%s%i", outfilenamebase, chunkcount) == outfilenamelen)
         {
-                printf("Output filename too long (hit buffer size of %i bytes\n", outfilenamelen);
+                printf("Output filename too long (hit buffer size of %i bytes)\n", outfilenamelen);
                 printf("Stopping now to avoid data issues.\n");
                 free(checkpointname);
                 close_file(&infile);
@@ -738,7 +804,6 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 return -1;
         }
 
-        printf("Writing to file %s\n", outfilename);
         if (open_file(outfilename, &outfile, false, true, 7500))
         {
                 printf("Couldn't open output file for writing\n");
@@ -783,7 +848,8 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 bytesleftinchunk -= bytecount;
                 if (0 == bytesleftinchunk)
                 {
-                        printf("Finished chunk %i.\n", chunkcount);
+                        if (g_verbose)
+                                printf("Finished chunk %i.\n", chunkcount);
                         close_file(&outfile);
 
                         if (end_chunk(outfilename, md5, sha1))
@@ -810,7 +876,6 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                                 printf("Stopping now to avoid data issues.\n");
                                 break;
                         }
-                        printf("Writing to file %s\n", outfilename);
                         if (open_file(outfilename, &outfile, false, true, 7500))
                         {
                                 printf("Couldn't open output file for writing\n");
@@ -863,7 +928,7 @@ int main(int argc, char *argv[])
                                 break;
                         case 'v':
                                 g_verbose = true;
-                                printf("Setting verbose to true. (Actually has no effect right now.)\n");
+                                printf("Setting verbose to true.\n");
                                 break;
                         case '?':
                                 if (optopt == 's')
