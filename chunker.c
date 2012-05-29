@@ -38,6 +38,9 @@
 
 /**** Constants and macros */
 
+#define FILE_BUFFER_SIZE        (10000)
+#define META_VERSION            (0);
+
 /**** Typedefs */
 
 typedef struct file_info_s
@@ -57,11 +60,21 @@ typedef struct checkpoint_s
         unsigned int last_chunk;
 } checkpoint;
 
+typedef struct split_metadata_s
+{
+        unsigned int version;
+        unsigned long long int filesize;
+        unsigned long long int chunksize;
+        unsigned int chunkcount;
+} split_metadata;
+
 /**** Statics */
 
 static int g_debug_max_chunk = 0;
 static bool g_hit_debug_max_chunk = false;
 
+static bool g_debug_hash = false;
+static bool g_debug_chunk_size_check = false;
 static bool g_debug_file_ops = false;
 static bool g_debug_checkpoint = false;
 
@@ -69,6 +82,7 @@ static char g_tmpfile_template[300];
 static bool g_tmpfile_template_created = false;
 
 static bool g_verbose = false;
+static bool g_verify_mode = false;
 
 /**** Prototypes */
 
@@ -80,12 +94,15 @@ static int reset_context(CRYPT_CONTEXT *context);
 static int create_checkpoint(checkpoint **cp, const char *filename, unsigned long long int chunksize);
 static int delete_checkpoint(checkpoint *cp);
 static int destroy_checkpoint(checkpoint *cp);
-static int restore_checkpoint(checkpoint **cp, bool *checkpoint_found, const char *filename, unsigned int *chunk, unsigned long long int chunksize);
+static int restore_checkpoint(const char *outfilenamebase, checkpoint **cp, bool *checkpoint_found, 
+                                const char *filename, unsigned int *chunk, unsigned long long int chunksize);
 static int update_checkpoint(checkpoint *cp, unsigned int chunk);
+
+static int read_context_hash(const char *basename, const char *extension, char *hash, int *hash_length);
 
 /**** Worker functions */
 
-#if 0
+#if 1
 static void dump_buf(const char *buf, unsigned int count)
 {
         char s[8 + 2 + (16 * 3) + 1];
@@ -396,6 +413,215 @@ static int file_write_next_buffer(file_info *file, const char *buf, unsigned int
 
 /**** Main functions */
 
+static int check_chunk(const char *outfilenamebase, int chunk, unsigned long long int chunksize, bool check_size)
+{
+        int outfilenamelen, rc;
+        int problem = 0;
+        unsigned long long int size;
+        unsigned int bytecount;
+        char *outfilename;
+        char *buf;
+        file_info file;
+        char calc_sha1[CRYPT_MAX_HASHSIZE], calc_md5[CRYPT_MAX_HASHSIZE];
+        char read_sha1[CRYPT_MAX_HASHSIZE], read_md5[CRYPT_MAX_HASHSIZE];
+        int sha1_length, md5_length;
+        int read_sha1_length, read_md5_length;
+
+        if (g_verbose)
+        {
+                printf("Using output filename base '%s'\n", outfilenamebase);
+        }
+
+        outfilenamelen = strlen(outfilenamebase) + 1 + 6 + 1;
+        outfilename = (char *)malloc(outfilenamelen);
+        if (NULL == outfilename)
+        {
+                printf("Couldn't allocate memory for output filenames\n");
+                problem = 1;
+        }
+        else if (snprintf(outfilename, outfilenamelen, "%s%i", outfilenamebase, chunk) == outfilenamelen)
+        {
+                printf("Output filename too long (hit buffer size of %i bytes)\n", outfilenamelen);
+                problem = 1;
+        }
+
+        if ((0 == problem) && check_size)
+        {
+                if (filesize(outfilename, &size))
+                {
+                        printf("Couldn't get filesize of input file '%s'\n", outfilename);
+                        problem = 1;
+                }
+                else
+                {
+                        if (size != chunksize)
+                        {
+                                printf("File size %lld doesn't match given chunksize %lld\n", size, chunksize);
+                                problem = 1;
+                        }
+                        else if (g_verbose)
+                        {
+                                printf("File size %lld matches chunksize %lld\n", size, chunksize);
+                        }
+                }
+        }
+
+        if (problem)
+                goto check_chunk_exit;
+
+        if (g_verbose)
+                printf("Opening %s for verifying\n", outfilename);
+        if (open_file(outfilename, &file, true, false, FILE_BUFFER_SIZE))
+        {
+                printf("Couldn't open %s for reading\n", outfilename);
+                problem = 1;
+        }
+        else
+        {
+                CRYPT_CONTEXT *md5, *sha1;
+
+                md5 = init_context(CRYPT_ALGO_MD5);
+                if (!md5)
+                {
+                        printf("Couldn't create MD5 context\n");
+                        problem = 1;
+                }
+                sha1 = init_context(CRYPT_ALGO_SHA1);
+                if (!sha1)
+                {
+                        free_context(md5);
+                        printf("Couldn't create SHA1 context\n");
+                        problem = 1;
+                }
+
+                if (problem)
+                {
+                        close_file(&file);
+                        goto check_chunk_exit;
+                }
+
+                reset_context(md5);
+                reset_context(sha1);
+
+                file_read_next_buffer(&file, &buf, -1, &bytecount);
+                while (bytecount && size)
+                {
+                        rc = cryptEncrypt(*md5, buf, bytecount);
+                        if (cryptStatusError(rc))
+                        {
+                                printf("Couldn't update MD5 hash context - rc %i\n", rc);
+                                break;
+                        }
+                        rc = cryptEncrypt(*sha1, buf, bytecount);
+                        if (cryptStatusError(rc))
+                        {
+                                printf("Couldn't update SHA-1 hash context - rc %i\n", rc);
+                                break;
+                        }
+
+                        size -= bytecount;
+                        if (size)
+                                file_read_next_buffer(&file, &buf, -1, &bytecount);
+                }
+                close_file(&file);
+
+                rc = cryptEncrypt(*md5, buf, 0);
+                if (cryptStatusError(rc))
+                {
+                        printf("Error finalising MD5 - rc %i\n", rc);
+                        free_context(md5);
+                        problem = 1;
+                }
+                rc = cryptEncrypt(*sha1, buf, 0);
+                if (cryptStatusError(rc))
+                {
+                        printf("Error finalising SHA1 - rc %i\n", rc);
+                        free_context(sha1);
+                        problem = 1;
+                }
+
+                if (problem)
+                        goto check_chunk_exit;
+
+                rc = cryptGetAttributeString(*sha1, CRYPT_CTXINFO_HASHVALUE, calc_sha1, &sha1_length);
+                if (cryptStatusError(rc))
+                {
+                        printf("Couldn't get hash from SHA1 context - rc %i\n", rc);
+                        problem = 1;
+                }
+                else if (g_debug_hash)
+                {
+                        printf("Calculated SHA1 hash, %i bytes\n", sha1_length);
+                }
+
+                rc = cryptGetAttributeString(*md5, CRYPT_CTXINFO_HASHVALUE, calc_md5, &md5_length);
+                if (cryptStatusError(rc))
+                {
+                        printf("Couldn't get hash from MD5 context - rc %i\n", rc);
+                        problem = 1;
+                }
+                else if (g_debug_hash)
+                {
+                        printf("Calculated MD5 hash, %i bytes\n", md5_length);
+                }
+
+                free_context(md5);
+                free_context(sha1);
+
+                if (problem)
+                        goto check_chunk_exit;
+
+                if (read_context_hash(outfilename, "sha1", read_sha1, &read_sha1_length))
+                {
+                        printf("Couldn't read SHA1 hash\n");
+                        problem = 1;
+                }
+                else if (read_context_hash(outfilename, "md5", read_md5, &read_md5_length))
+                {
+                        printf("Couldn't read MD5 hash\n");
+                        problem = 1;
+                }
+                else if (read_sha1_length != sha1_length)
+                {
+                        printf("Mismatch - read SHA1 length %i calculated %i\n", read_sha1_length, sha1_length);
+                        problem = 1;
+                }
+                else if (read_md5_length != md5_length)
+                {
+                        printf("Mismatch - read MD5 length %i calculated %i\n", read_md5_length, md5_length);
+                        problem = 1;
+                }
+                else
+                {
+                        if (g_debug_hash)
+                        {
+                                printf("SHA1:\n");
+                                printf("Just calculated: ");
+                                dump_buf(calc_sha1, sha1_length);
+                                printf("    Stored hash: ");
+                                dump_buf(read_sha1, read_sha1_length);
+                                printf("MD5:\n");
+                                printf("Just calculated: ");
+                                dump_buf(calc_md5, md5_length);
+                                printf("    Stored hash: ");
+                                dump_buf(read_md5, read_md5_length);
+                        }
+
+                        if (memcmp(read_sha1, calc_sha1, sha1_length) || memcmp(read_md5, calc_md5, md5_length))
+                        {
+                                printf("Hash check failed.\n");
+                                problem = 1;
+                        }
+                }
+
+                if (problem)
+                        goto check_chunk_exit;
+        }
+
+check_chunk_exit:
+        return problem;
+}
+
 static int create_checkpoint(checkpoint **cp, const char *filename, unsigned long long int chunksize)
 {
         checkpoint *tmp_cp;
@@ -427,7 +653,8 @@ static int destroy_checkpoint(checkpoint *cp)
         return 0;
 }
 
-static int restore_checkpoint(checkpoint **cp, bool *checkpoint_found, const char *filename, unsigned int *chunk, unsigned long long int chunksize)
+static int restore_checkpoint(const char *outfilenamebase, checkpoint **cp, bool *checkpoint_found, 
+                                const char *filename, unsigned int *chunk, unsigned long long int chunksize)
 {
         checkpoint tmp_cp;
         checkpoint *new_cp;
@@ -458,16 +685,8 @@ static int restore_checkpoint(checkpoint **cp, bool *checkpoint_found, const cha
                 else
                 {
                         close(fd);
-                        /* TODO fix me */
-#if 0
-                        if (strcmp(tmp_cp.filename, filename) != 0)
-                        {
-                                printf("Filenames differ, invalid checkpoint\n");
-                                unlink(filename);
-                        }
-                        else 
-#endif
-                                if (tmp_cp.chunksize != chunksize)
+
+                        if (tmp_cp.chunksize != chunksize)
                         {
                                 printf("Chunksizes differ, invalid checkpoint\n");
                                 unlink(filename);
@@ -476,13 +695,32 @@ static int restore_checkpoint(checkpoint **cp, bool *checkpoint_found, const cha
                         {
                                 *checkpoint_found = true;
 
-                                new_cp = malloc(sizeof(checkpoint));
-                                new_cp->filename = strdup(filename);
-                                new_cp->chunksize = tmp_cp.chunksize;
-                                new_cp->last_chunk = tmp_cp.last_chunk;
-                                *chunk = new_cp->last_chunk;
-                                *cp = new_cp;
-                                printf("Found apparently-valid checkpoint, chunksize %lld, chunk %i\n", new_cp->chunksize, new_cp->last_chunk);
+                                if (check_chunk(outfilenamebase, tmp_cp.last_chunk, chunksize, true))
+                                {
+                                        printf("Last written chunk doesn't seem valid, discarding it.\n");
+                                        if (tmp_cp.last_chunk > 0)
+                                        {
+                                                tmp_cp.last_chunk -= 1;
+                                        }
+                                        else
+                                        {
+                                                printf("Doesn't leave us with any valid chunks, ignoring checkpoint.\n");
+                                                *checkpoint_found = false;
+                                        }
+                                }
+
+                                if (*checkpoint_found)
+                                {
+                                        new_cp = malloc(sizeof(checkpoint));
+                                        new_cp->filename = strdup(filename);
+                                        new_cp->chunksize = tmp_cp.chunksize;
+                                        new_cp->last_chunk = tmp_cp.last_chunk;
+                                        printf("Found apparently-valid checkpoint, chunksize %lld, chunk %i\n", 
+                                                        new_cp->chunksize, new_cp->last_chunk);
+
+                                        *chunk = new_cp->last_chunk;
+                                        *cp = new_cp;
+                                }
                         }
                 }
         }
@@ -610,6 +848,12 @@ static int write_context_hash(const char *basename, const char *extension, CRYPT
                 return rc;
         }
 
+        if (g_debug_hash)
+        {
+                printf("Just calculated %s hash for %s:\n", extension, basename);
+                dump_buf(hash, hash_length);
+        }
+
         assert(strlen(basename) > 0);
 
         buflen = strlen(basename) + strlen(extension) + 2;
@@ -629,6 +873,11 @@ static int write_context_hash(const char *basename, const char *extension, CRYPT
         }
         else
         {
+                if (g_debug_hash)
+                {
+                        printf("Writing %i bytes of hash to %s\n", hash_length, name);
+                }
+
                 rc = write(fd, hash, hash_length);
                 if (rc != hash_length)
                 {
@@ -636,11 +885,63 @@ static int write_context_hash(const char *basename, const char *extension, CRYPT
                         perror("Why");
                 }
 
+                fsync(fd);
                 close(fd);
         }
 
         free(name);
         return 0;
+}
+
+/* Incoming hash pointer must point to a buffer of length CRYPT_MAX_HASHSIZE */
+static int read_context_hash(const char *basename, const char *extension, char *hash, int *hash_length)
+{
+        int buflen, fd, rc;
+        char *name;
+
+        assert(basename);
+        assert(extension);
+        assert(hash);
+
+        assert(strlen(basename) > 0);
+
+        buflen = strlen(basename) + strlen(extension) + 2;
+        name = malloc(buflen);
+        if (NULL == name)
+        {
+                printf("Couldn't allocate %i byte name buffer.\n", buflen);
+                return -1;
+        }
+
+        snprintf(name, buflen, "%s.%s", basename, extension);
+
+        if (g_debug_hash)
+        {
+                printf("Trying to read hash from %s\n", name);
+        }
+
+        fd = open(name, O_RDONLY, 0622);
+        if (fd < 0)
+        {
+                printf("Unable to open file '%s' for reading.\n", name);
+                *hash_length = 0;
+                rc = -1;
+        }
+        else
+        {
+                rc = read(fd, hash, CRYPT_MAX_HASHSIZE);
+                *hash_length = rc;
+                if (g_debug_hash)
+                {
+                        printf("\tRead %i bytes for %s hash\n", *hash_length, extension);
+                }
+                rc = 0;
+
+                close(fd);
+        }
+
+        free(name);
+        return rc;
 }
 
 static int end_chunk(const char *outfilename, CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1)
@@ -677,6 +978,123 @@ static int end_chunk(const char *outfilename, CRYPT_CONTEXT *md5, CRYPT_CONTEXT 
         return 0;
 }
 
+static int read_meta(const char *outfilebasename, unsigned long long int *filesize, unsigned long long int *chunksize, unsigned int *chunkcount, split_metadata *meta)
+{
+        int fd, count, problem;
+        split_metadata tmp_meta;
+        char *name;
+
+        problem = 0;
+
+        name = malloc(strlen(outfilebasename) + strlen("meta") + 1);
+        if (NULL == name)
+        {
+                printf("Couldn't allocate working memory\n");
+                problem = 1;
+        }
+        else
+        {
+                snprintf(name, strlen(outfilebasename) + strlen("meta") + 1, "%smeta", outfilebasename);
+                fd = open(name, O_RDONLY, 0622);
+                if (fd < 0)
+                {
+                        printf("Unable to open '%s' for reading\n", name);
+                        problem = 1;
+                }
+                else
+                {
+                        count = read(fd, &tmp_meta, sizeof(split_metadata));
+                        if (count != sizeof(split_metadata))
+                        {
+                                printf("Error reading metadata - expected to read %i, read %i\n", sizeof(split_metadata), count);
+                                perror("Couldn't read");
+                                problem = 1;
+                        }
+                        else if (g_verbose)
+                        {
+                                printf("Successfully read metadata\n");
+                                printf("\tMetadata: filesize %lld; chunksize %lld; chunk count %i\n",
+                                                tmp_meta.filesize, tmp_meta.chunksize, tmp_meta.chunkcount);
+                        }
+
+                        if (meta)
+                                memcpy(meta, &tmp_meta, sizeof(split_metadata));
+                        if (NULL != filesize)
+                                *filesize = tmp_meta.filesize;
+                        if (NULL != chunksize)
+                                *chunksize = tmp_meta.chunksize;
+                        if (NULL != chunkcount)
+                                *chunkcount = tmp_meta.chunkcount;
+                }
+
+                free(name);
+        }
+
+        return problem;
+}
+
+static int write_meta(const char *outfilebasename, unsigned long long int filesize, unsigned long long int chunksize, unsigned int chunkcount, split_metadata *meta)
+{
+        int fd, count, problem;
+        split_metadata our_meta;
+        char *name;
+
+        problem = 0;
+
+        /* If they don't specify one, build it locally */
+        if (NULL == meta)
+        {
+                if (g_verbose)
+                {
+                        printf("User didn't specify meta struct, building our own.\n");
+                }
+                meta = &our_meta;
+                meta->version = META_VERSION;
+                meta->filesize = filesize;
+                meta->chunksize = chunksize;
+                meta->chunkcount = chunkcount;
+        }
+        else if (g_verbose)
+        {
+                printf("Using user-supplied meta-data struct\n");
+        }
+
+        name = malloc(strlen(outfilebasename) + strlen("meta") + 1);
+        if (NULL == name)
+        {
+                printf("Couldn't allocate working memory\n");
+                problem = 1;
+        }
+        else
+        {
+                snprintf(name, strlen(outfilebasename) + strlen("meta") + 1, "%smeta", outfilebasename);
+                fd = open(name, O_CREAT | O_WRONLY | O_TRUNC, 0622);
+                if (fd < 0)
+                {
+                        printf("unable to open '%s' for writing\n", name);
+                        problem = 1;
+                }
+                else
+                {
+                        count = write(fd, meta, sizeof(split_metadata));
+                        if (count != sizeof(split_metadata))
+                        {
+                                printf("Error writing metadata - expected to write %i, wrote %i\n", sizeof(split_metadata), count);
+                                perror("Couldn't write");
+                                problem = 1;
+                        }
+                        else if (g_verbose)
+                        {
+                                printf("Successfully wrote metadata\n");
+                        }
+                }
+
+                free(name);
+        }
+
+        return problem;
+}
+
 int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, const char *outfilenamebase, unsigned long long int chunksize)
 {
         char *buf;
@@ -687,6 +1105,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         int rc, retval = 0;
         int outfilenamelen, checkpointnamelen;
         bool checkpoint_found;
+        bool debug_end_chunk_now = false;
         signed int to_read;
         unsigned int bytecount;
         unsigned long long int bytesleftinchunk;
@@ -710,7 +1129,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
 
         printf("Splitting '%s' into chunks with basename '%s'\n", infilename, outfilenamebase);
 
-        if (open_file(infilename, &infile, true, false, 5000))
+        if (open_file(infilename, &infile, true, false, FILE_BUFFER_SIZE))
         {
                 printf("Couldn't open input file for reading\n");
                 return -1;
@@ -735,7 +1154,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         snprintf(checkpointname, checkpointnamelen, "%scheckpoint", outfilenamebase);
         printf("Using checkpoint file %s\n", checkpointname);
 
-        if (restore_checkpoint(&cp, &checkpoint_found, checkpointname, &starting_chunk, chunksize))
+        if (restore_checkpoint(outfilenamebase, &cp, &checkpoint_found, checkpointname, &starting_chunk, chunksize))
         {
                 printf("Error trying to restore checkpoint\n");
                 close_file(&infile);
@@ -804,7 +1223,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 return -1;
         }
 
-        if (open_file(outfilename, &outfile, false, true, 7500))
+        if (open_file(outfilename, &outfile, false, true, FILE_BUFFER_SIZE))
         {
                 printf("Couldn't open output file for writing\n");
                 free(checkpointname);
@@ -817,6 +1236,22 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         rc = 0;
         while ((bytecount > 0) && (rc == 0))
         {
+                if (g_debug_chunk_size_check && (g_debug_max_chunk == (chunkcount + 1)))
+                {
+                        if (bytecount != outfile.bufsize)
+                        {
+                                printf("Seems to be the last buffer, changing bytecount from %i\n", bytecount);
+                                bytecount /= 2;
+                                printf("\tCount now %i\n", bytecount);
+                                debug_end_chunk_now = true;
+                        }
+                        else
+                        {
+                                printf("Bytecount %i matches bufsize %i, assuming not last buffer\n", 
+                                                bytecount, outfile.bufsize);
+                        }
+                }
+
                 rc = file_write_next_buffer(&outfile, buf, bytecount);
                 if (rc != 0)
                 {
@@ -846,7 +1281,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 }
 
                 bytesleftinchunk -= bytecount;
-                if (0 == bytesleftinchunk)
+                if ((0 == bytesleftinchunk) || (debug_end_chunk_now))
                 {
                         if (g_verbose)
                                 printf("Finished chunk %i.\n", chunkcount);
@@ -864,7 +1299,7 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                         chunkcount++;
                         if ((g_debug_max_chunk > 0) && (chunkcount >= g_debug_max_chunk))
                         {
-                                printf("Debug: stopping after chunk %i\n", chunkcount);
+                                printf("Debug: stopping at chunk %i\n", chunkcount);
                                 rc = -1;
                                 g_hit_debug_max_chunk = true;
                                 break;
@@ -890,12 +1325,17 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
                 file_read_next_buffer(&infile, &buf, to_read, &bytecount);
         } while ((bytecount > 0) && (rc == 0));
 
-        close_file(&infile);
-        close_file(&outfile);
-        if (end_chunk(outfilename, md5, sha1))
+        if ((chunksize != bytesleftinchunk) && (!debug_end_chunk_now))
         {
-                printf("Error ending chunk\n");
-                retval = -1;
+                if (end_chunk(outfilename, md5, sha1))
+                {
+                        printf("Error ending chunk\n");
+                        retval = -1;
+                }
+        }
+        else if (g_verbose)
+        {
+                printf("Ended on chunk boundary (%s)\n", g_hit_debug_max_chunk?"by debug":"by chance");
         }
 
         delete_checkpoint(cp);
@@ -904,7 +1344,132 @@ int split_file(CRYPT_CONTEXT *md5, CRYPT_CONTEXT *sha1, const char *infilename, 
         free(checkpointname);
         free(outfilename);
 
+        write_meta(outfilenamebase, infile.size, chunksize, chunkcount, NULL);
+
+        close_file(&infile);
+        close_file(&outfile);
+
         return retval;
+}
+
+int verify_file(const char *filenamebase, unsigned long long int chunksize)
+{
+        char *filename;
+        int problem = 0;
+        int filenamelen;
+        unsigned long long int total_size;
+        unsigned int chunkcount;
+        struct stat st;
+        split_metadata meta;
+        bool have_metadata = true;
+
+        if (!filenamebase)
+        {
+                printf("Invalid output filename %p\n", filenamebase);
+                return -1;
+        }
+
+        printf("Verifying split of '%s'\n", filenamebase);
+
+        /* Filename, ., make wild assumption of no more than 100000 chunks. */
+        filenamelen = strlen(filenamebase) + 1 + 6 + 1;
+        filename = (char *)malloc(filenamelen);
+        if (NULL == filename)
+        {
+                printf("Couldn't allocate memory for filenames\n");
+                return -1;
+        }
+
+        if (read_meta(filenamebase, NULL, NULL, NULL, &meta))
+        {
+                printf("Couldn't read metadata; doesn't look good, trying anyway.\n");
+                have_metadata = false;
+        }
+
+        total_size = 0;
+        chunkcount = 0;
+        do
+        {
+                if (snprintf(filename, filenamelen, "%s%i", filenamebase, chunkcount) == filenamelen)
+                {
+                        printf("Filename too long (hit buffer size of %i bytes)\n", filenamelen);
+                        printf("Stopping now to avoid data issues.\n");
+                        problem = 1;
+                        break;
+                }
+                if (stat(filename, &st))
+                {
+                        if (have_metadata)
+                        {
+                                printf("File '%s' not found; should be %i chunks.\n", filename, meta.chunkcount);
+                                problem = 1;
+                        }
+                        else
+                                printf("File '%s' not found, assuming end of split.\n", filename);
+                        break;
+                }
+                else if (have_metadata)
+                {
+                        /* We know how big the chunks should be, check it */
+                        if (meta.chunksize != st.st_size)
+                        {
+                                if (chunkcount != meta.chunkcount)
+                                {
+                                        printf("Chunksize %lld doesn't match filesize %lld\n", meta.chunksize, (unsigned long long int)st.st_size);
+                                        printf("Chunk count is %i (expecting %i), doesn't look right.\n", chunkcount, meta.chunkcount);
+                                }
+                                else if (g_verbose)
+                                {
+                                        printf("Chunksize %lld doesn't match filesize %lld\n", meta.chunksize, (unsigned long long int)st.st_size);
+                                        printf("Chunk count is %i (expecting %i), accepting it.\n", chunkcount, meta.chunkcount);
+                                }
+                        }
+                }
+
+                if (check_chunk(filenamebase, chunkcount, 0, false))
+                {
+                        printf("Error checking chunk %i\n", chunkcount);
+                        problem = 1;
+                }
+                else
+                {
+                        total_size += st.st_size;
+                        if (g_verbose)
+                                printf("Now checked %lld bytes\n", total_size);
+                }
+
+                chunkcount++;
+                if (have_metadata)
+                {
+                        if (chunkcount > meta.chunkcount)
+                        {
+                                if (g_verbose)
+                                {
+                                        printf("Finished all chunks\n");
+                                        printf("Total of all chunks: %lld bytes; expected %lld\n", total_size, meta.filesize);
+                                }
+                                if (total_size != meta.filesize)
+                                {
+                                        printf("Wrong.\n");
+                                        problem = 1;
+                                }
+                                break;
+                        }
+                }
+        } while (1);
+
+        free(filename);
+
+        if (problem)
+        {
+                printf("Verify failed\n");
+        }
+        else
+        {
+                printf("Verify passed.\n");
+        }
+
+        return problem;
 }
  
 int main(int argc, char *argv[])
@@ -914,12 +1479,25 @@ int main(int argc, char *argv[])
         CRYPT_CONTEXT *md5, *sha1;
         unsigned long int chunksize = (10 * 1024);
         char *infile, *basename;
+        bool bail = false;
 
-        while ((c = getopt(argc, argv, "s:v")) != -1)
+        while (((c = getopt(argc, argv, "cs:m:v")) != -1) && (false == bail))
         {
                 switch (c)
                 {
+                        case 'c':
+                                g_verify_mode = true;
+                                printf("Setting verify mode to true\n");
+                                break;
                         case 's':
+                                chunksize = atoi(optarg);
+                                if (0 == chunksize)
+                                {
+                                        printf("Bad chunksize '%s'\n", optarg);
+                                        bail = true;
+                                }
+                                break;
+                        case 'm':
                                 g_debug_max_chunk = atoi(optarg);
                                 if ((0 == g_debug_max_chunk) && (!strcmp(optarg, "0")))
                                         printf("Warning - '%s' doesn't seem to be a number.\n", optarg);
@@ -944,12 +1522,21 @@ int main(int argc, char *argv[])
                                 abort();
                 }
         }
+        if (g_debug_chunk_size_check && (g_debug_max_chunk == 0))
+        {
+                printf("To debug chunk size checking you need debug_max_chunk as well.\n");
+                printf("Disabling chunk size checking.\n");
+                g_debug_chunk_size_check = false;
+        }
+
+        if (bail)
+                return -1;
 
         infile = NULL;
         basename = NULL;
         for (index = optind; index < argc; index++)
         {
-                if (NULL == infile)
+                if ((NULL == infile) && (!g_verify_mode))
                         infile = argv[index];
                 else if (NULL == basename)
                         basename = argv[index];
@@ -960,9 +1547,10 @@ int main(int argc, char *argv[])
                 }
         }
 
-        if ((NULL == infile) || (NULL == basename))
+        if (((NULL == infile) && !g_verify_mode) || (NULL == basename))
         {
                 fprintf(stderr, "Not enough arguments - need to supply filename and basename for chunks.\n");
+                fprintf(stderr, "infile %p, verify %i, basename %p\n", infile, g_verify_mode, basename);
                 return -1;
         }
 
@@ -980,7 +1568,10 @@ int main(int argc, char *argv[])
         if (!sha1)
                 printf("Couldn't create SHA1 context\n");
 
-        split_file(md5, sha1, infile, basename, chunksize);
+        if (g_verify_mode)
+                verify_file(basename, chunksize);
+        else
+                split_file(md5, sha1, infile, basename, chunksize);
 
         free_context(md5);
         free_context(sha1);

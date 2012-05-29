@@ -15,6 +15,9 @@ chunker: chunker.c $(CRYPTLIB_DIR)/$(CRYPTLIB_LIB)
 run: chunker
 	./chunker tests/testinput_1.bin testinput_1.bin.
 
+run2: chunker
+	./chunker -s 15360 tests/testinput_1.bin testinput_1.bin.
+
 gdb: chunker
 	gdb -x gdb.args
 
@@ -31,9 +34,16 @@ dataclean:
 check: run 
 	$(QUIET)./check.sh testinput_1.bin.
 
+check2: run2
+	$(QUIET)./check.sh testinput_1.bin.
+
+# requires at least one 'run' target to have been run
+verify: chunker
+	./chunker -c testinput_1.bin.
+
 # see Run target earlier
 stopcheck: chunker
-	./chunker -v -s 2 tests/testinput_1.bin testinput_1.bin.
+	./chunker -v -m 2 tests/testinput_1.bin testinput_1.bin.
 
 valgrind: chunker
 	valgrind --suppressions=valgrind.supp --leak-check=full ./chunker tests/testinput_1.bin testinput_1.bin.
