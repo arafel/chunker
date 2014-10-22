@@ -1,0 +1,6 @@
+compiler:
+  - gcc
+  - clang
+language: c
+install: make get-deps build-deps
+script: make check
