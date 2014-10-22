@@ -725,7 +725,7 @@ static int restore_checkpoint(const char *outfilenamebase, checkpoint **cp, bool
                 }
         }
 
-        return 0;
+        return ret;
 }
 
 static int delete_checkpoint(checkpoint *cp)
