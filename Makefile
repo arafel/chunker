@@ -21,7 +21,6 @@ get-deps: clean-deps
 	mkdir $(CRYPTLIB_DIR)
 	curl -o $(CRYPTLIB_DIR)/$(CRYPTLIB_FILE) $(CRYPTLIB_URL)
 	unzip -o -q -a -d $(CRYPTLIB_DIR) $(CRYPTLIB_DIR)/$(CRYPTLIB_FILE)
-	cd ..
 
 build-deps: $(CRYPTLIB_DIR)
 	make -C $(CRYPTLIB_DIR)

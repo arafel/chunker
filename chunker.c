@@ -159,7 +159,7 @@ static CRYPT_CONTEXT *init_context(CRYPT_ALGO_TYPE algorithm)
         context = malloc(sizeof(CRYPT_CONTEXT));
         if (!context)
         {
-                printf("Couldn't allocate %i bytes for context.\n", sizeof(CRYPT_CONTEXT));
+                printf("Couldn't allocate %zu bytes for context.\n", sizeof(CRYPT_CONTEXT));
                 return NULL;
         }
 
@@ -340,14 +340,14 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
                 *buf = file->start_buf + file->offset;
                 if (g_debug_file_ops)
                 {
-                        printf("\t%s - file %p - adjusted offset by %i bytes (start %p buf now %p)\n", __func__,
+                        printf("\t%s - file %p - adjusted offset by %zu bytes (start %p buf now %p)\n", __func__,
                                         file, bytestoread, file->start_buf, *buf);
                 }
         }
         else
         {
                 printf("File isn't mapped, less easy.\n");
-                printf("Reading %i bytes.\n", bytestoread);
+                printf("Reading %zu bytes.\n", bytestoread);
 
                 /* For speed, assume we're the only ones using this file pointer. */
                 bytesread = read(file->fd, file->temp_buf, bytestoread);
@@ -361,11 +361,11 @@ static int file_read_next_buffer(file_info *file, char **buf, signed int toread,
                 }
                 else if (bytesread != bytestoread)
                 {
-                        printf("Bytes read %i doesn't match bufsize %i\n", bytesread, bytestoread);
+                        printf("Bytes read %zu doesn't match bufsize %zu\n", bytesread, bytestoread);
                 }
                 else if (g_debug_file_ops)
                 {
-                        printf("\t%s - file %p - read %i bytes (target %i)\n",  __func__, file, bytesread, bytestoread);
+                        printf("\t%s - file %p - read %zu bytes (target %zu)\n",  __func__, file, bytesread, bytestoread);
                 }
         }
 
@@ -404,7 +404,7 @@ static int file_write_next_buffer(file_info *file, const char *buf, unsigned int
         }
         else if (written != count)
         {
-                printf("Warning - expected to write %d bytes, only wrote %d. Disk becoming full?\n", written, count);
+                printf("Warning - expected to write %zu bytes, only wrote %d. Disk becoming full?\n", written, count);
                 retval = -2;
         }
 
@@ -735,10 +735,10 @@ static int delete_checkpoint(checkpoint *cp)
         assert(cp);
         assert(cp->filename);
         
+        ret = 0;
         if (!g_hit_debug_max_chunk)
         {
                 ret = unlink(cp->filename);
-                ret = 0;
                 if (ret != 0)
                 {
                         printf("Deleting '%s'\n", cp->filename);
@@ -1006,7 +1006,7 @@ static int read_meta(const char *outfilebasename, unsigned long long int *filesi
                         count = read(fd, &tmp_meta, sizeof(split_metadata));
                         if (count != sizeof(split_metadata))
                         {
-                                printf("Error reading metadata - expected to read %i, read %i\n", sizeof(split_metadata), count);
+                                printf("Error reading metadata - expected to read %zu, read %i\n", sizeof(split_metadata), count);
                                 perror("Couldn't read");
                                 problem = 1;
                         }
@@ -1079,7 +1079,7 @@ static int write_meta(const char *outfilebasename, unsigned long long int filesi
                         count = write(fd, meta, sizeof(split_metadata));
                         if (count != sizeof(split_metadata))
                         {
-                                printf("Error writing metadata - expected to write %i, wrote %i\n", sizeof(split_metadata), count);
+                                printf("Error writing metadata - expected to write %zu, wrote %i\n", sizeof(split_metadata), count);
                                 perror("Couldn't write");
                                 problem = 1;
                         }
