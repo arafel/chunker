@@ -735,10 +735,10 @@ static int delete_checkpoint(checkpoint *cp)
         assert(cp);
         assert(cp->filename);
         
+        ret = 0;
         if (!g_hit_debug_max_chunk)
         {
                 ret = unlink(cp->filename);
-                ret = 0;
                 if (ret != 0)
                 {
                         printf("Deleting '%s'\n", cp->filename);
